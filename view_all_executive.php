@@ -709,11 +709,17 @@ $show_custom_dates = ($date_filter == 'custom');
                 </span>
             </h1>
             <div class="header-actions">
-                
+                <span class="filter-info">
+                    <strong><?php echo getDateRangeDisplay($date_filter, $from_date, $to_date); ?></strong>
+                    <?php if ($coupon_filter != 'all'): ?>
+                        | Coupon: <strong><?php echo htmlspecialchars($coupon_display); ?></strong>
+                    <?php endif; ?>
+                    | Executive: <strong><?php echo htmlspecialchars($executive_name); ?></strong>
+                </span>
                 <button class="filter-btn" id="openPanel">
                     <i class="fas fa-filter"></i> Filters
                 </button>
-                
+                <a href="salesexecutive_dashboard.php" class="back-btn"><i class="fas fa-arrow-left"></i> Back</a>
             </div>
         </div>
         
