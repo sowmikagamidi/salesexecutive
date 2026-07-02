@@ -1,8 +1,14 @@
 <?php
-// salesexecutive_dashboard.php
-include_once 'config.php';
+$pageTitle = "Sales Executive Dashboard";
+include('config.php');
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
 
-// Fixed Executive ID = 19 (Rahul Sharma)
+$pagename = 'cp_dashboard';
+
+$default_board_id = '';
+
 $executive_id = 19;
 
 // Get filter parameters
@@ -11,11 +17,15 @@ $coupon_filter = isset($_GET['coupon_filter']) ? $_GET['coupon_filter'] : 'all';
 $from_date = isset($_GET['from_date']) ? $_GET['from_date'] : '';
 $to_date = isset($_GET['to_date']) ? $_GET['to_date'] : '';
 
+// =============================================
+// DATABASE FUNCTIONS USING $db
+// =============================================
+
 // Build date filter conditions
 function getDateCondition($date_filter, $from_date = '', $to_date = '') {
     switch ($date_filter) {
         case 'today':
-            return "AND ph.order_date >= CURDATE()";
+            return "AND DATE(ph.order_date) = CURDATE()";
         case 'week':
             return "AND ph.order_date >= DATE_SUB(NOW(), INTERVAL 7 DAY)";
         case '15days':
@@ -30,7 +40,7 @@ function getDateCondition($date_filter, $from_date = '', $to_date = '') {
             return "AND ph.order_date >= DATE_SUB(NOW(), INTERVAL 1 YEAR)";
         case 'custom':
             if (!empty($from_date) && !empty($to_date)) {
-                return "AND ph.order_date BETWEEN '" . $from_date . " 00:00:00' AND '" . $to_date . " 23:59:59'";
+                return "AND DATE(ph.order_date) BETWEEN '" . $from_date . "' AND '" . $to_date . "'";
             }
             return "";
         default:
@@ -47,271 +57,213 @@ function getCouponCondition($coupon_filter) {
     }
 }
 
-// Function to format currency with 2 decimal places
-function formatCurrency($amount) {
-    return '₹ ' . number_format((float)$amount, 2);
-}
-
 // Function to get executive details
-function getExecutiveDetails($pdo, $executive_id) {
-    try {
-        $stmt = $pdo->prepare("
-            SELECT 
-                user_id,
-                full_name as executive_name,
-                email_id,
-                mobile_number,
-                role
-            FROM users 
-            WHERE user_id = :executive_id
-            AND user_type = 'SE'
-        ");
-        $stmt->execute([':executive_id' => $executive_id]);
-        return $stmt->fetch(PDO::FETCH_ASSOC);
-    } catch(PDOException $e) {
-        return null;
-    }
+function getExecutiveDetails($db, $executive_id) {
+    $sql = "
+        SELECT 
+            user_id,
+            full_name AS executive_name,
+            email_id,
+            mobile_number,
+            role
+        FROM USERS 
+        WHERE user_id = :executive_id
+        AND user_type = 'SE'
+    ";
+    return $db->fetchDBQuery($sql, ['executive_id' => $executive_id], true);
 }
 
-// Function to get executive stats with filters
-function getExecutiveStats($pdo, $executive_id, $date_filter, $coupon_filter, $from_date, $to_date) {
-    try {
-        $date_condition = getDateCondition($date_filter, $from_date, $to_date);
-        $coupon_condition = getCouponCondition($coupon_filter);
-        
-        $stmt = $pdo->prepare("
-            SELECT 
-                COUNT(DISTINCT ph.order_id) as total_orders,
-                COALESCE(SUM(ph.order_amount), 0) as total_sales,
-                COALESCE(SUM(ph.order_amount * 0.25), 0) as total_commission,
-                COUNT(DISTINCT ph.student_id) as total_students
-            FROM tx_purchase_history ph
-            LEFT JOIN tx_coupon_codes cc ON ph.coupon_id = cc.coupon_id
-            WHERE ph.payment_status = 'S'
+// Function to get executive stats with filters - USING executive_id from coupons
+function getExecutiveStats($db, $executive_id, $date_filter, $coupon_filter, $from_date, $to_date) {
+    $date_condition = getDateCondition($date_filter, $from_date, $to_date);
+    $coupon_condition = getCouponCondition($coupon_filter);
+    
+    $sql = "
+        SELECT 
+            COUNT(DISTINCT ph.order_id) AS total_orders,
+            COALESCE(SUM(ph.order_amount), 0) AS total_sales,
+            COALESCE(SUM(ph.order_amount * 0.25), 0) AS total_commission,
+            COUNT(DISTINCT ph.student_id) AS total_students
+        FROM TX_PURCHASE_HISTORY ph
+        LEFT JOIN TX_COUPON_CODES cc ON ph.coupon_id = cc.coupon_id
+        WHERE ph.payment_status = 'S'
+        AND ph.amount > 0
+        AND cc.executive_id = :executive_id
+        AND cc.is_active = 1
+        $date_condition
+        $coupon_condition
+    ";
+    
+    $result = $db->fetchDBQuery($sql, ['executive_id' => $executive_id], true);
+    
+    // Get active coupons count - USING executive_id
+    $sql2 = "
+        SELECT COUNT(*) AS active_coupons
+        FROM TX_COUPON_CODES
+        WHERE executive_id = :executive_id 
+        AND is_active = 1
+    ";
+    $coupons = $db->fetchDBQuery($sql2, ['executive_id' => $executive_id], true);
+    
+    return [
+        'total_orders' => $result['total_orders'] ?? 0,
+        'total_sales' => (float)($result['total_sales'] ?? 0),
+        'total_commission' => (float)($result['total_commission'] ?? 0),
+        'total_students' => $result['total_students'] ?? 0,
+        'active_coupons' => $coupons['active_coupons'] ?? 0
+    ];
+}
+
+// Function to get coupon performance with filters - USING executive_id
+function getCouponPerformance($db, $executive_id, $date_filter, $coupon_filter, $from_date, $to_date, $limit = 5) {
+    $date_condition = getDateCondition($date_filter, $from_date, $to_date);
+    
+    if ($coupon_filter == 'all') {
+        $coupon_condition = "";
+    } else {
+        $coupon_condition = "AND ph.coupon_id = " . (int)$coupon_filter;
+    }
+    
+    $sql = "
+        SELECT
+            cc.coupon_id,
+            cc.coupon_code,
+            DATE_FORMAT(cc.created_dtm,'%d %b %Y') AS issued_on,
+            DATE_FORMAT(cc.expires_at,'%d %b %Y') AS expiry_date,
+            COUNT(ph.order_id) AS total_used,
+            COUNT(DISTINCT ph.student_id) AS total_students,
+            COALESCE(SUM(ph.order_amount),0) AS sales_amount,
+            COALESCE(SUM(ph.order_amount*0.25),0) AS commission
+        FROM TX_COUPON_CODES cc
+        LEFT JOIN TX_PURCHASE_HISTORY ph
+            ON ph.coupon_id = cc.coupon_id
+            AND ph.payment_status = 'S'
             AND ph.amount > 0
-            AND ph.created_by = :executive_id
-            AND cc.is_active = 1
             $date_condition
-            $coupon_condition
-        ");
-        $stmt->execute([':executive_id' => $executive_id]);
-        $result = $stmt->fetch(PDO::FETCH_ASSOC);
-        
-        // Get active coupons count
-        $stmt2 = $pdo->prepare("
-            SELECT COUNT(*) as active_coupons
-            FROM tx_coupon_codes
-            WHERE created_by = :executive_id 
-            AND is_active = 1
-        ");
-        $stmt2->execute([':executive_id' => $executive_id]);
-        $coupons = $stmt2->fetch(PDO::FETCH_ASSOC);
-        
-        return [
-            'total_orders' => $result['total_orders'] ?? 0,
-            'total_sales' => (float)$result['total_sales'] ?? 0,
-            'total_commission' => (float)$result['total_commission'] ?? 0,
-            'total_students' => $result['total_students'] ?? 0,
-            'active_coupons' => $coupons['active_coupons'] ?? 0
-        ];
-    } catch(PDOException $e) {
-        return [
-            'total_orders' => 0,
-            'total_sales' => 0,
-            'total_commission' => 0,
-            'total_students' => 0,
-            'active_coupons' => 0
-        ];
+        WHERE cc.executive_id = :executive_id
+        AND cc.is_active = 1
+        $coupon_condition
+        GROUP BY
+            cc.coupon_id,
+            cc.coupon_code,
+            cc.created_dtm,
+            cc.expires_at
+        ORDER BY total_used DESC
+    ";
+
+    if ($limit > 0) {
+        $sql .= " LIMIT " . (int)$limit;
     }
-}
 
-// Function to get coupon performance with filters
-function getCouponPerformance($pdo, $executive_id, $date_filter, $coupon_filter, $from_date, $to_date, $limit = 5) {
-    try {
-        $date_condition = getDateCondition($date_filter, $from_date, $to_date);
-        
-        if ($coupon_filter == 'all') {
-            $coupon_condition = "";
-        } else {
-            $coupon_condition = "AND ph.coupon_id = " . (int)$coupon_filter;
-        }
-        
-        $sql = "
-            SELECT 
-                cc.coupon_code,
-                cc.coupon_id,
-                DATE_FORMAT(cc.created_dtm, '%d %b %Y') as issued_on,
-                DATE_FORMAT(cc.expires_at, '%d %b %Y') as expiry_date,
-                COUNT(ph.order_id) as total_used,
-                COUNT(DISTINCT ph.student_id) as total_students,
-                COALESCE(SUM(ph.order_amount), 0) as sales_amount,
-                COALESCE(SUM(ph.order_amount * 0.25), 0) as commission,
-                CASE 
-                    WHEN COUNT(ph.order_id) > 0 
-                    THEN ROUND((COUNT(ph.order_id) / 
-                        NULLIF((SELECT COUNT(*) FROM tx_purchase_history 
-                         WHERE payment_status = 'S' AND amount > 0 AND created_by = :executive_id2 $date_condition), 0)) * 100, 0)
-                    ELSE 0 
-                END as usage_rate
-            FROM tx_coupon_codes cc
-            LEFT JOIN tx_purchase_history ph ON cc.coupon_id = ph.coupon_id 
-                AND ph.payment_status = 'S' 
-                AND ph.amount > 0
-                AND ph.created_by = :executive_id
-                $date_condition
-            WHERE cc.is_active = 1
-            AND cc.created_by = :executive_id
-            GROUP BY cc.coupon_id
-            ORDER BY total_used DESC
-        ";
-        
-        if ($limit > 0) {
-            $sql .= " LIMIT " . $limit;
-        }
-        
-        $stmt = $pdo->prepare($sql);
-        $stmt->execute([
-            ':executive_id' => $executive_id,
-            ':executive_id2' => $executive_id
-        ]);
-        $coupons = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        
-        $total_orders = 0;
-        foreach ($coupons as $c) {
-            $total_orders += $c['total_used'];
-        }
-        
-        foreach ($coupons as &$c) {
-            $c['usage_rate'] = $total_orders > 0 ? round(($c['total_used'] / $total_orders) * 100, 0) : 0;
-            $c['sales_amount'] = (float)$c['sales_amount'];
-            $c['commission'] = (float)$c['commission'];
-        }
-        
-        return $coupons;
-    } catch(PDOException $e) {
-        return [];
+    $coupons = $db->fetchDBQuery($sql, [
+        'executive_id' => $executive_id
+    ]);
+
+    $totalOrders = array_sum(array_column($coupons, 'total_used'));
+
+    foreach ($coupons as &$coupon) {
+        $coupon['usage_rate'] = $totalOrders > 0
+            ? round(($coupon['total_used'] / $totalOrders) * 100)
+            : 0;
+
+        $coupon['sales_amount'] = (float)$coupon['sales_amount'];
+        $coupon['commission'] = (float)$coupon['commission'];
     }
+
+    return $coupons;
 }
 
-// Function to get orders with filters - only 7 records
-function getOrders($pdo, $executive_id, $date_filter, $coupon_filter, $from_date, $to_date, $limit = 7) {
-    try {
-        $date_condition = getDateCondition($date_filter, $from_date, $to_date);
-        $coupon_condition = getCouponCondition($coupon_filter);
-        
-        $sql = "
-            SELECT 
-                ph.order_id,
-                u.full_name as student_name,
-                cc.coupon_code,
-                ph.order_amount as amount,
-                DATE_FORMAT(ph.order_date, '%d %b %Y') as order_date_formatted,
-                ph.order_date,
-                ph.payment_status,
-                ex.full_name as executive_name
-            FROM tx_purchase_history ph
-            LEFT JOIN users u ON ph.student_id = u.user_id
-            LEFT JOIN tx_coupon_codes cc ON ph.coupon_id = cc.coupon_id
-            LEFT JOIN users ex ON ph.created_by = ex.user_id
-            WHERE ph.payment_status = 'S'
-            AND ph.amount > 0
-            AND ph.created_by = :executive_id
-            AND cc.is_active = 1
-            $date_condition
-            $coupon_condition
-            ORDER BY ph.order_date DESC
-        ";
-        
-        if ($limit > 0) {
-            $sql .= " LIMIT " . $limit;
-        }
-        
-        $stmt = $pdo->prepare($sql);
-        $stmt->execute([':executive_id' => $executive_id]);
-        $orders = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        
-        foreach ($orders as &$order) {
-            $order['amount'] = (float)$order['amount'];
-        }
-        
-        return $orders;
-    } catch(PDOException $e) {
-        return [];
+// Function to get orders with filters - USING executive_id
+function getOrders($db, $executive_id, $date_filter, $coupon_filter, $from_date, $to_date, $limit = 5) {
+    $date_condition = getDateCondition($date_filter, $from_date, $to_date);
+    $coupon_condition = getCouponCondition($coupon_filter);
+    
+    $sql = "
+        SELECT 
+            ph.order_id,
+            u.full_name AS student_name,
+            cc.coupon_code,
+            ph.order_amount AS amount,
+            DATE_FORMAT(ph.order_date, '%d %b %Y') AS order_date_formatted,
+            ph.order_date,
+            ph.payment_status,
+            ex.full_name AS executive_name
+        FROM TX_PURCHASE_HISTORY ph
+        LEFT JOIN USERS u ON ph.student_id = u.user_id
+        LEFT JOIN TX_COUPON_CODES cc ON ph.coupon_id = cc.coupon_id
+        LEFT JOIN USERS ex ON cc.executive_id = ex.user_id
+        WHERE ph.payment_status = 'S'
+        AND ph.amount > 0
+        AND cc.executive_id = :executive_id
+        AND cc.is_active = 1
+        $date_condition
+        $coupon_condition
+        ORDER BY ph.order_date DESC
+        LIMIT " . (int)$limit . "
+    ";
+    
+    $orders = $db->fetchDBQuery($sql, ['executive_id' => $executive_id]);
+    
+    foreach ($orders as &$order) {
+        $order['amount'] = (float)$order['amount'];
     }
+    
+    return $orders;
 }
 
-// Function to get all orders (for view all)
-function getAllOrders($pdo, $executive_id, $date_filter, $coupon_filter, $from_date, $to_date) {
-    return getOrders($pdo, $executive_id, $date_filter, $coupon_filter, $from_date, $to_date, 0);
-}
-
-// Function to get all coupons (for view all)
-function getAllCoupons($pdo, $executive_id, $date_filter, $coupon_filter, $from_date, $to_date) {
-    return getCouponPerformance($pdo, $executive_id, $date_filter, $coupon_filter, $from_date, $to_date, 0);
-}
-
-// Function to get sales overview with filters
-function getSalesOverview($pdo, $executive_id, $date_filter, $coupon_filter, $from_date, $to_date) {
-    try {
-        $date_condition = getDateCondition($date_filter, $from_date, $to_date);
-        $coupon_condition = getCouponCondition($coupon_filter);
-        
-        $stmt = $pdo->prepare("
-            SELECT 
-                DATE_FORMAT(ph.order_date, '%b %d') as date_label,
-                COALESCE(SUM(ph.order_amount), 0) as sales,
-                COALESCE(SUM(ph.order_amount * 0.25), 0) as commission
-            FROM tx_purchase_history ph
-            LEFT JOIN tx_coupon_codes cc ON ph.coupon_id = cc.coupon_id
-            WHERE ph.payment_status = 'S'
-            AND ph.amount > 0
-            AND ph.created_by = :executive_id
-            AND cc.is_active = 1
-            $date_condition
-            $coupon_condition
-            GROUP BY DATE(ph.order_date)
-            ORDER BY ph.order_date ASC
-        ");
-        $stmt->execute([':executive_id' => $executive_id]);
-        $result = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        
-        foreach ($result as &$row) {
-            $row['sales'] = (float)$row['sales'];
-            $row['commission'] = (float)$row['commission'];
-        }
-        
-        return $result;
-    } catch(PDOException $e) {
-        return [];
+// Function to get sales overview with filters - USING executive_id
+function getSalesOverview($db, $executive_id, $date_filter, $coupon_filter, $from_date, $to_date) {
+    $date_condition = getDateCondition($date_filter, $from_date, $to_date);
+    $coupon_condition = getCouponCondition($coupon_filter);
+    
+    $sql = "
+        SELECT 
+            DATE_FORMAT(ph.order_date, '%b %d') AS date_label,
+            COALESCE(SUM(ph.order_amount), 0) AS sales,
+            COALESCE(SUM(ph.order_amount * 0.25), 0) AS commission
+        FROM TX_PURCHASE_HISTORY ph
+        LEFT JOIN TX_COUPON_CODES cc ON ph.coupon_id = cc.coupon_id
+        WHERE ph.payment_status = 'S'
+        AND ph.amount > 0
+        AND cc.executive_id = :executive_id
+        AND cc.is_active = 1
+        $date_condition
+        $coupon_condition
+        GROUP BY DATE(ph.order_date)
+        ORDER BY ph.order_date ASC
+    ";
+    
+    $result = $db->fetchDBQuery($sql, ['executive_id' => $executive_id]);
+    
+    foreach ($result as &$row) {
+        $row['sales'] = (float)$row['sales'];
+        $row['commission'] = (float)$row['commission'];
     }
+    
+    return $result;
 }
 
-// Function to get coupons for dropdown
-function getExecutiveCoupons($pdo, $executive_id) {
-    try {
-        $stmt = $pdo->prepare("
-            SELECT 
-                coupon_id,
-                coupon_code
-            FROM tx_coupon_codes
-            WHERE created_by = :executive_id
-            AND is_active = 1
-            ORDER BY coupon_code
-        ");
-        $stmt->execute([':executive_id' => $executive_id]);
-        return $stmt->fetchAll(PDO::FETCH_ASSOC);
-    } catch(PDOException $e) {
-        return [];
-    }
+// Function to get coupons for dropdown - USING executive_id
+function getExecutiveCoupons($db, $executive_id) {
+    $sql = "
+        SELECT 
+            coupon_id,
+            coupon_code
+        FROM TX_COUPON_CODES
+        WHERE executive_id = :executive_id
+        AND is_active = 1
+        ORDER BY coupon_code
+    ";
+    return $db->fetchDBQuery($sql, ['executive_id' => $executive_id]);
 }
 
 // ===== GET ALL DATA =====
-$executive = getExecutiveDetails($pdo, $executive_id);
-$stats = getExecutiveStats($pdo, $executive_id, $date_filter, $coupon_filter, $from_date, $to_date);
-$coupons = getCouponPerformance($pdo, $executive_id, $date_filter, $coupon_filter, $from_date, $to_date, 5);
-$orders = getOrders($pdo, $executive_id, $date_filter, $coupon_filter, $from_date, $to_date, 7);
-$sales_overview = getSalesOverview($pdo, $executive_id, $date_filter, $coupon_filter, $from_date, $to_date);
-$executive_coupons = getExecutiveCoupons($pdo, $executive_id);
+$executive = getExecutiveDetails($db, $executive_id);
+$stats = getExecutiveStats($db, $executive_id, $date_filter, $coupon_filter, $from_date, $to_date);
+$coupons = getCouponPerformance($db, $executive_id, $date_filter, $coupon_filter, $from_date, $to_date, 5);
+$orders = getOrders($db, $executive_id, $date_filter, $coupon_filter, $from_date, $to_date);
+$sales_overview = getSalesOverview($db, $executive_id, $date_filter, $coupon_filter, $from_date, $to_date);
+$executive_coupons = getExecutiveCoupons($db, $executive_id);
 
 // If no executive found
 if (!$executive) {
@@ -326,25 +278,6 @@ if (!$executive) {
 $executive_name = $executive['executive_name'] ?? 'Rahul Sharma';
 $has_coupons = count($coupons) > 0;
 $has_orders = count($orders) > 0;
-
-// Get date range display
-function getDateRangeDisplay($date_filter, $from_date = '', $to_date = '') {
-    switch ($date_filter) {
-        case 'today': return 'Today';
-        case 'week': return 'Last 7 Days';
-        case '15days': return 'Last 15 Days';
-        case 'month': return 'Last 1 Month';
-        case '3months': return 'Last 3 Months';
-        case '6months': return 'Last 6 Months';
-        case 'year': return 'Last 1 Year';
-        case 'custom':
-            if (!empty($from_date) && !empty($to_date)) {
-                return date('d M Y', strtotime($from_date)) . ' - ' . date('d M Y', strtotime($to_date));
-            }
-            return 'Custom';
-        default: return 'All Time';
-    }
-}
 
 // Get coupon name for display
 $coupon_display = 'All Coupons';
@@ -365,10 +298,11 @@ $show_custom_dates = ($date_filter == 'custom');
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sales Executive Dashboard - Rahul Sharma</title>
+    <title>Sales Executive Dashboard - <?php echo htmlspecialchars($executive_name); ?></title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-    <script src="ajax_dashboard.js"></script>
+    <script src="dashboard_ajax.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -417,7 +351,28 @@ $show_custom_dates = ($date_filter == 'custom');
             font-size: 13px;
         }
         
-        /* Filter Section */
+        .filter-section .btn-apply {
+            padding: 8px 25px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            align-self: center;
+        }
+        .filter-section .btn-apply:hover {
+            background: #5a6fd6;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+        }
+        .filter-section .btn-apply:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        
         .filter-section {
             background: white;
             padding: 18px 25px;
@@ -510,7 +465,6 @@ $show_custom_dates = ($date_filter == 'custom');
             flex-direction: column;
         }
         
-        /* Loading indicator */
         .filter-loading {
             display: none;
             align-self: center;
@@ -716,6 +670,8 @@ $show_custom_dates = ($date_filter == 'custom');
         .btn-secondary { background: #95a5a6; }
         .btn-secondary:hover { background: #7f8c8d; }
         .btn-sm { padding: 5px 15px; font-size: 12px; }
+        .btn-primary { background: #667eea; }
+        .btn-primary:hover { background: #5a6fd6; }
         
         .status-badge {
             display: inline-block;
@@ -725,23 +681,6 @@ $show_custom_dates = ($date_filter == 'custom');
             font-weight: 600;
         }
         .status-badge.success { background: #d4edda; color: #155724; }
-        
-        .progress-bar {
-            background: #ecf0f1;
-            border-radius: 10px;
-            height: 8px;
-            width: 100px;
-            display: inline-block;
-            vertical-align: middle;
-        }
-        .progress-bar .fill {
-            height: 100%;
-            border-radius: 10px;
-            transition: width 0.6s ease;
-        }
-        .progress-bar .fill.green { background: #27ae60; }
-        .progress-bar .fill.orange { background: #e67e22; }
-        .progress-bar .fill.red { background: #e74c3c; }
         
         .coupon-code {
             font-weight: 600;
@@ -759,6 +698,15 @@ $show_custom_dates = ($date_filter == 'custom');
             color: #7f8c8d;
         }
         .empty-state .icon { font-size: 48px; margin-bottom: 10px; }
+        
+        .order-count-badge {
+            font-size: 12px;
+            color: #7f8c8d;
+            background: #f8f9fa;
+            padding: 4px 12px;
+            border-radius: 12px;
+            margin-left: 10px;
+        }
         
         @media (max-width: 768px) {
             .chart-container { grid-template-columns: 1fr; }
@@ -796,7 +744,6 @@ $show_custom_dates = ($date_filter == 'custom');
             <form id="filterForm" style="display: contents;">
                 <input type="hidden" name="executive" value="<?php echo $executive_id; ?>">
                 
-                <!-- Date Range Filter -->
                 <div class="filter-group">
                     <span class="filter-label">📅 Date Range</span>
                     <select name="date_filter" id="date_filter">
@@ -812,7 +759,6 @@ $show_custom_dates = ($date_filter == 'custom');
                     </select>
                 </div>
                 
-                <!-- Custom Date Range -->
                 <div class="custom-date-group <?php echo $show_custom_dates ? 'show' : ''; ?>">
                     <div class="filter-group">
                         <span class="filter-label">From</span>
@@ -826,7 +772,6 @@ $show_custom_dates = ($date_filter == 'custom');
                 
                 <div class="filter-divider"></div>
                 
-                <!-- Coupon Filter -->
                 <div class="filter-group">
                     <span class="filter-label">🏷️ Coupon</span>
                     <select name="coupon_filter" id="coupon_filter">
@@ -852,6 +797,10 @@ $show_custom_dates = ($date_filter == 'custom');
                     <span class="spinner"></span> Loading...
                 </div>
                 
+                <button type="button" class="btn-apply" id="showFilters">
+                    <i class="fas fa-filter"></i> Apply
+                </button>
+                
                 <a href="salesexecutive_dashboard.php" class="btn-reset">Reset</a>
             </form>
         </div>
@@ -860,7 +809,7 @@ $show_custom_dates = ($date_filter == 'custom');
         <div class="stats-grid" id="statsGrid">
             <div class="stat-card blue">
                 <div class="stat-label">Total Sales</div>
-                <div class="stat-value" id="totalSales"><?php echo formatCurrency($stats['total_sales']); ?></div>
+                <div class="stat-value" id="totalSales">₹ <?php echo number_format((float)$stats['total_sales'], 2); ?></div>
                 <div class="stat-sub">Total Order Amount</div>
             </div>
             <div class="stat-card green">
@@ -875,7 +824,7 @@ $show_custom_dates = ($date_filter == 'custom');
             </div>
             <div class="stat-card orange">
                 <div class="stat-label">Total Commission</div>
-                <div class="stat-value" id="totalCommission"><?php echo formatCurrency($stats['total_commission']); ?></div>
+                <div class="stat-value" id="totalCommission">₹ <?php echo number_format((float)$stats['total_commission'], 2); ?></div>
                 <div class="stat-sub">25% Commission</div>
             </div>
             <div class="stat-card red">
@@ -885,6 +834,16 @@ $show_custom_dates = ($date_filter == 'custom');
             </div>
         </div>
 
+        <!-- Sales Overview Chart -->
+        <div class="section">
+            <div class="section-title">📈 Sales & Commission Overview</div>
+            <div class="chart-container">
+                <div class="chart-box">
+                    <canvas id="salesChart"></canvas>
+                </div>
+                
+            </div>
+        </div>
 
         <!-- Coupon Performance Table -->
         <div class="section">
@@ -904,7 +863,6 @@ $show_custom_dates = ($date_filter == 'custom');
                             <th>Total Students</th>
                             <th>Sales (₹)</th>
                             <th>Commission (₹)</th>
-                            
                         </tr>
                     </thead>
                     <tbody id="couponTableBody">
@@ -919,14 +877,13 @@ $show_custom_dates = ($date_filter == 'custom');
                                 <td><?php echo $coupon['expiry_date']; ?></td>
                                 <td><strong><?php echo $coupon['total_used']; ?></strong></td>
                                 <td><strong><?php echo $coupon['total_students']; ?></strong></td>
-                                <td><?php echo formatCurrency($coupon['sales_amount']); ?></td>
-                                <td><?php echo formatCurrency($coupon['commission']); ?></td>
-                               
+                                <td>₹ <?php echo number_format((float)$coupon['sales_amount'], 2); ?></td>
+                                <td>₹ <?php echo number_format((float)$coupon['commission'], 2); ?></td>
                             </tr>
                             <?php endforeach; ?>
                         <?php else: ?>
                             <tr id="noCouponRow">
-                                <td colspan="8" style="text-align: center; padding: 30px; color: #7f8c8d;">
+                                <td colspan="7" style="text-align: center; padding: 30px; color: #7f8c8d;">
                                     <div class="empty-state">
                                         <div class="icon">🎫</div>
                                         <p>No coupons found for <?php echo htmlspecialchars($executive_name); ?>.</p>
@@ -939,10 +896,13 @@ $show_custom_dates = ($date_filter == 'custom');
             </div>
         </div>
 
-        <!-- Orders Table -->
+        <!-- Orders Table (Limited to 5) -->
         <div class="section">
             <div class="section-header">
-                <div class="section-title">🛒 Orders</div>
+                <div class="section-title">
+                    🛒 Orders 
+                    <span class="order-count-badge">Latest 5</span>
+                </div>
                 <a href="view_all_executive.php?type=orders&executive=<?php echo $executive_id; ?>&date_filter=<?php echo $date_filter; ?>&coupon_filter=<?php echo $coupon_filter; ?><?php echo $from_date ? '&from_date='.$from_date : ''; ?><?php echo $to_date ? '&to_date='.$to_date : ''; ?>" class="btn btn-sm btn-primary" target="_blank">View All Orders →</a>
             </div>
             
@@ -953,9 +913,9 @@ $show_custom_dates = ($date_filter == 'custom');
                             <th>Order ID</th>
                             <th>Student</th>
                             <th>Coupon Code</th>
-                            
+                            <th>Executive</th>
                             <th>Amount</th>
-                            <th>Order Date</th>
+                            <th>Date</th>
                             <th>Status</th>
                         </tr>
                     </thead>
@@ -966,8 +926,8 @@ $show_custom_dates = ($date_filter == 'custom');
                                 <td><strong>#<?php echo $order['order_id']; ?></strong></td>
                                 <td><?php echo htmlspecialchars($order['student_name'] ?? 'N/A'); ?></td>
                                 <td><span class="coupon-code"><?php echo htmlspecialchars($order['coupon_code'] ?? 'N/A'); ?></span></td>
-                           
-                                <td><?php echo formatCurrency($order['amount']); ?></td>
+                                <td><?php echo htmlspecialchars($order['executive_name'] ?? 'N/A'); ?></td>
+                                <td>₹ <?php echo number_format((float)$order['amount'], 2); ?></td>
                                 <td><?php echo $order['order_date_formatted']; ?></td>
                                 <td><span class="status-badge success">Success</span></td>
                             </tr>
@@ -986,16 +946,6 @@ $show_custom_dates = ($date_filter == 'custom');
                 </table>
             </div>
         </div>
-        <!-- Sales Overview Chart -->
-        <div class="section">
-            <div class="section-title">📈 Sales & Commission Overview</div>
-            <div class="chart-container">
-                <div class="chart-box">
-                    <canvas id="salesChart"></canvas>
-                </div>
-                
-            </div>
-        </div>
     </div>
 
     <script>
@@ -1004,8 +954,8 @@ $show_custom_dates = ($date_filter == 'custom');
         var salesData = <?php echo json_encode($sales_overview); ?>;
         
         var labels = salesData.length > 0 ? salesData.map(item => item.date_label) : ['No Data'];
-        var sales = salesData.length > 0 ? salesData.map(item => item.sales) : [0];
-        var commissions = salesData.length > 0 ? salesData.map(item => item.commission) : [0];
+        var sales = salesData.length > 0 ? salesData.map(item => parseFloat(item.sales).toFixed(2)) : [0];
+        var commissions = salesData.length > 0 ? salesData.map(item => parseFloat(item.commission).toFixed(2)) : [0];
 
         window.salesChartInstance = new Chart(ctx, {
             type: 'line',

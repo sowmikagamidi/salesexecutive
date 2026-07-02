@@ -1,6 +1,11 @@
 <?php
-// admin_dashboard.php
-include_once 'config.php';
+$pageTitle = "Admin Dashboard";
+include('config.php');
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
+
+$pagename = 'cp_dashboard';
 
 // Get filter parameters
 $executive_filter = isset($_GET['executive_filter']) ? (int)$_GET['executive_filter'] : 0;
@@ -9,43 +14,37 @@ $coupon_filter = isset($_GET['coupon_filter']) ? $_GET['coupon_filter'] : 'all';
 $from_date = isset($_GET['from_date']) ? $_GET['from_date'] : '';
 $to_date = isset($_GET['to_date']) ? $_GET['to_date'] : '';
 
-// Get all executives for dropdown
-function getAllExecutivesList($pdo) {
-    try {
-        $stmt = $pdo->prepare("
-            SELECT user_id, full_name as executive_name
-            FROM users
-            WHERE user_type = 'SE'
-            AND is_deleted = 0
-            AND user_status = 'A'
-            ORDER BY full_name
-        ");
-        $stmt->execute();
-        return $stmt->fetchAll(PDO::FETCH_ASSOC);
-    } catch(PDOException $e) {
-        return [];
-    }
+function getAllExecutivesList($db) {
+    $sql = "
+        SELECT
+            user_id,
+            full_name AS executive_name
+        FROM USERS
+        WHERE user_type = 'SE'
+        AND is_deleted = 0
+        AND user_status = 'A'
+        ORDER BY full_name
+    ";
+
+    return $db->fetchDBQuery($sql);
 }
 
-// Get all coupons for dropdown
-function getAllCouponsList($pdo) {
-    try {
-        $stmt = $pdo->prepare("
-            SELECT coupon_id, coupon_code
-            FROM tx_coupon_codes
-            WHERE is_active = 1
-            AND coupon_code LIKE 'S%'
-            ORDER BY coupon_code
-        ");
-        $stmt->execute();
-        return $stmt->fetchAll(PDO::FETCH_ASSOC);
-    } catch(PDOException $e) {
-        return [];
-    }
+function getAllCouponsList($db) {
+    $sql = "
+        SELECT
+            coupon_id,
+            coupon_code
+        FROM TX_COUPON_CODES
+        WHERE is_active = 1
+        AND coupon_code LIKE 'S%'
+        ORDER BY coupon_code
+    ";
+
+    return $db->fetchDBQuery($sql);
 }
 
-$executives_list = getAllExecutivesList($pdo);
-$coupons_list = getAllCouponsList($pdo);
+$executives_list = getAllExecutivesList($db);
+$coupons_list = getAllCouponsList($db);
 
 // Build date filter conditions
 function getDateCondition($date_filter, $from_date = '', $to_date = '') {
@@ -79,7 +78,7 @@ function getExecutiveFilterCondition($executive_filter) {
     if ($executive_filter == 0) {
         return "";
     } else {
-        return "AND ph.created_by = " . (int)$executive_filter;
+        return "AND ph.executive_id = " . (int)$executive_filter;
     }
 }
 
@@ -92,389 +91,332 @@ function getCouponFilterCondition($coupon_filter) {
     }
 }
 
-// Function to format currency with 2 decimal places
-function formatCurrency($amount) {
-    return '₹ ' . number_format((float)$amount, 2);
-}
-
-// Function to format number with 2 decimal places
-function formatNumber($number) {
-    return number_format((float)$number, 2);
-}
-
 // Function to get executive name
-function getExecutiveName($pdo, $executive_id) {
-    if ($executive_id == 0) return 'All Executives';
-    try {
-        $stmt = $pdo->prepare("SELECT full_name FROM users WHERE user_id = :id");
-        $stmt->execute([':id' => $executive_id]);
-        $result = $stmt->fetch(PDO::FETCH_ASSOC);
-        return $result ? $result['full_name'] : 'All Executives';
-    } catch(PDOException $e) {
+function getExecutiveName($db, $executive_id) {
+    if ($executive_id == 0) {
         return 'All Executives';
     }
+
+    $sql = "
+        SELECT
+            full_name
+        FROM USERS
+        WHERE user_id = :id
+    ";
+
+    $result = $db->fetchDBQuery($sql, [
+        'id' => $executive_id
+    ], true);
+
+    return $result ? $result['full_name'] : 'All Executives';
 }
 
 // Function to get coupon name
-function getCouponName($pdo, $coupon_id) {
-    if ($coupon_id == 'all') return 'All Coupons';
-    try {
-        $stmt = $pdo->prepare("SELECT coupon_code FROM tx_coupon_codes WHERE coupon_id = :id");
-        $stmt->execute([':id' => $coupon_id]);
-        $result = $stmt->fetch(PDO::FETCH_ASSOC);
-        return $result ? $result['coupon_code'] : 'All Coupons';
-    } catch(PDOException $e) {
+function getCouponName($db, $coupon_id) {
+    if ($coupon_id == 'all') {
         return 'All Coupons';
     }
+
+    $sql = "
+        SELECT
+            coupon_code
+        FROM TX_COUPON_CODES
+        WHERE coupon_id = :id
+    ";
+
+    $result = $db->fetchDBQuery($sql, [
+        'id' => $coupon_id
+    ], true);
+
+    return $result ? $result['coupon_code'] : 'All Coupons';
 }
 
-$selected_executive_name = getExecutiveName($pdo, $executive_filter);
-$selected_coupon_name = getCouponName($pdo, $coupon_filter);
+$selected_executive_name = getExecutiveName($db, $executive_filter);
+$selected_coupon_name = getCouponName($db, $coupon_filter);
 
-// Function to get dashboard stats
-function getDashboardStats($pdo, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date) {
-    try {
-        $date_condition = getDateCondition($date_filter, $from_date, $to_date);
-        $executive_condition = getExecutiveFilterCondition($executive_filter);
-        $coupon_condition = getCouponFilterCondition($coupon_filter);
-        
-        $stmt = $pdo->prepare("
-            SELECT COALESCE(ROUND(SUM(ph.order_amount), 2), 0) as total_sales
-            FROM tx_purchase_history ph
-            LEFT JOIN tx_coupon_codes cc ON ph.coupon_id = cc.coupon_id
-            WHERE ph.payment_status = 'S'
+
+
+// Function to get executives (TOP 5 only) - using executive_id
+function getTopExecutives($db, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date, $limit = 5) {
+    $date_condition = getDateCondition($date_filter, $from_date, $to_date);
+    $coupon_condition = getCouponFilterCondition($coupon_filter);
+    $executive_condition = getExecutiveFilterCondition($executive_filter);
+    
+    $sql = "
+        SELECT 
+            u.user_id,
+            u.full_name as executive_name,
+            COUNT(DISTINCT ph.order_id) as total_orders,
+            COALESCE(ROUND(SUM(ph.order_amount), 2), 0) as total_sales,
+            COALESCE(ROUND(SUM(ph.order_amount * 0.25), 2), 0) as total_commission,
+            COUNT(DISTINCT cc.coupon_id) as active_coupons
+        FROM USERS u
+        LEFT JOIN TX_PURCHASE_HISTORY ph ON u.user_id = ph.created_by 
+            AND ph.payment_status = 'S' 
             AND ph.amount > 0
-            AND cc.coupon_code LIKE 'S%'
             $date_condition
-            $executive_condition
-            $coupon_condition
-        ");
-        $stmt->execute();
-        $total_sales = $stmt->fetch(PDO::FETCH_ASSOC)['total_sales'] ?? 0;
-        
-        $stmt = $pdo->prepare("
-            SELECT COUNT(DISTINCT ph.order_id) as total_orders
-            FROM tx_purchase_history ph
-            LEFT JOIN tx_coupon_codes cc ON ph.coupon_id = cc.coupon_id
-            WHERE ph.payment_status = 'S'
-            AND ph.amount > 0
-            AND cc.coupon_code LIKE 'S%'
-            $date_condition
-            $executive_condition
-            $coupon_condition
-        ");
-        $stmt->execute();
-        $total_orders = $stmt->fetch(PDO::FETCH_ASSOC)['total_orders'] ?? 0;
-        
-        $stmt = $pdo->prepare("
-            SELECT COALESCE(ROUND(SUM(ph.order_amount * 0.25), 2), 0) as total_commission
-            FROM tx_purchase_history ph
-            LEFT JOIN tx_coupon_codes cc ON ph.coupon_id = cc.coupon_id
-            WHERE ph.payment_status = 'S'
-            AND ph.amount > 0
-            AND cc.coupon_code LIKE 'S%'
-            $date_condition
-            $executive_condition
-            $coupon_condition
-        ");
-        $stmt->execute();
-        $total_commission = $stmt->fetch(PDO::FETCH_ASSOC)['total_commission'] ?? 0;
-        
-        $stmt = $pdo->prepare("
-            SELECT COUNT(*) as total_executives
-            FROM users
-            WHERE user_type = 'SE'
-            AND is_deleted = 0
-        ");
-        $stmt->execute();
-        $total_executives = $stmt->fetch(PDO::FETCH_ASSOC)['total_executives'] ?? 0;
-        
-        $stmt = $pdo->prepare("
-            SELECT COUNT(DISTINCT ph.created_by) as active_executives
-            FROM tx_purchase_history ph
-            LEFT JOIN tx_coupon_codes cc ON ph.coupon_id = cc.coupon_id
-            WHERE ph.payment_status = 'S'
-            AND ph.amount > 0
-            AND cc.coupon_code LIKE 'S%'
-        ");
-        $stmt->execute();
-        $active_executives = $stmt->fetch(PDO::FETCH_ASSOC)['active_executives'] ?? 0;
-        
-        return [
-            'total_sales' => (float)$total_sales,
-            'total_orders' => (int)$total_orders,
-            'total_commission' => (float)$total_commission,
-            'total_executives' => (int)$total_executives,
-            'active_executives' => (int)$active_executives
-        ];
-    } catch(PDOException $e) {
-        return [
-            'total_sales' => 0,
-            'total_orders' => 0,
-            'total_commission' => 0,
-            'total_executives' => 0,
-            'active_executives' => 0
-        ];
+        LEFT JOIN TX_COUPON_CODES cc ON u.user_id = cc.executive_id AND cc.is_active = 1 AND cc.coupon_code LIKE 'S%'
+        WHERE u.user_type = 'SE'
+        AND u.is_deleted = 0
+        $executive_condition
+        GROUP BY u.user_id
+        HAVING total_sales > 0 OR active_coupons > 0
+        ORDER BY total_sales DESC
+    ";
+    
+    if ($limit > 0) {
+        $sql .= " LIMIT " . $limit;
     }
+    
+    return $db->fetchDBQuery($sql);
 }
 
-// Function to get sales overview data
-function getSalesOverview($pdo, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date) {
-    try {
-        $date_condition = getDateCondition($date_filter, $from_date, $to_date);
-        $executive_condition = getExecutiveFilterCondition($executive_filter);
-        $coupon_condition = getCouponFilterCondition($coupon_filter);
-        
-        $stmt = $pdo->prepare("
-            SELECT 
-                DATE_FORMAT(ph.order_date, '%d %b') as date_label,
-                COALESCE(ROUND(SUM(ph.order_amount), 2), 0) as sales,
-                COALESCE(ROUND(SUM(ph.order_amount * 0.25), 2), 0) as commission
-            FROM tx_purchase_history ph
-            LEFT JOIN tx_coupon_codes cc ON ph.coupon_id = cc.coupon_id
-            WHERE ph.payment_status = 'S'
-            AND ph.amount > 0
-            AND cc.coupon_code LIKE 'S%'
-            $date_condition
-            $executive_condition
-            $coupon_condition
-            GROUP BY DATE(ph.order_date)
-            ORDER BY ph.order_date ASC
-            LIMIT 30
-        ");
-        $stmt->execute();
-        return $stmt->fetchAll(PDO::FETCH_ASSOC);
-    } catch(PDOException $e) {
-        return [];
-    }
-}
+// Function to get dashboard stats - using executive_id
+function getDashboardStats($db, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date) {
+    $date_condition = getDateCondition($date_filter, $from_date, $to_date);
+    $executive_condition = getExecutiveFilterCondition($executive_filter);
+    $coupon_condition = getCouponFilterCondition($coupon_filter);
 
-// Function to get sales by discount type
-function getSalesByDiscountType($pdo, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date) {
-    try {
-        $date_condition = getDateCondition($date_filter, $from_date, $to_date);
-        $executive_condition = getExecutiveFilterCondition($executive_filter);
-        $coupon_condition = getCouponFilterCondition($coupon_filter);
-        
-        $stmt = $pdo->prepare("
-            SELECT 
-                cc.discount_type,
-                COALESCE(ROUND(SUM(ph.order_amount), 2), 0) as total_sales,
-                COUNT(DISTINCT ph.order_id) as order_count
-            FROM tx_purchase_history ph
-            LEFT JOIN tx_coupon_codes cc ON ph.coupon_id = cc.coupon_id
-            WHERE ph.payment_status = 'S'
-            AND ph.amount > 0
-            AND cc.coupon_code LIKE 'S%'
-            $date_condition
-            $executive_condition
-            $coupon_condition
-            GROUP BY cc.discount_type
-            ORDER BY total_sales DESC
-        ");
-        $stmt->execute();
-        $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        
-        $total_sales = array_sum(array_column($results, 'total_sales'));
-        
-        foreach ($results as &$row) {
-            $row['percentage'] = $total_sales > 0 ? round(($row['total_sales'] / $total_sales) * 100, 0) : 0;
-            $row['label'] = $row['discount_type'] == 'percentage' ? 'Percentage (%)' : 'Flat (₹)';
-        }
-        
-        return $results;
-    } catch(PDOException $e) {
-        return [];
-    }
-}
+    $sql = "
+        SELECT
+            COALESCE(ROUND(SUM(ph.order_amount), 2), 0) AS total_sales
+        FROM TX_PURCHASE_HISTORY ph
+        LEFT JOIN TX_COUPON_CODES cc
+            ON ph.coupon_id = cc.coupon_id
+        WHERE ph.payment_status = 'S'
+        AND ph.amount > 0
+        AND cc.coupon_code LIKE 'S%'
+        $date_condition
+        $coupon_condition
+        $executive_condition
+    ";
+    $sales = $db->fetchDBQuery($sql, [], true);
 
-// Function to get sales by subscription type
-function getSalesBySubscriptionType($pdo, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date) {
-    try {
-        $date_condition = getDateCondition($date_filter, $from_date, $to_date);
-        $executive_condition = getExecutiveFilterCondition($executive_filter);
-        $coupon_condition = getCouponFilterCondition($coupon_filter);
-        
-        $stmt = $pdo->prepare("
-            SELECT 
-                ph.subscription_type,
-                COALESCE(ROUND(SUM(ph.order_amount), 2), 0) as total_sales,
-                COUNT(DISTINCT ph.order_id) as order_count
-            FROM tx_purchase_history ph
-            LEFT JOIN tx_coupon_codes cc ON ph.coupon_id = cc.coupon_id
-            WHERE ph.payment_status = 'S'
-            AND ph.amount > 0
-            AND cc.coupon_code LIKE 'S%'
-            $date_condition
-            $executive_condition
-            $coupon_condition
-            GROUP BY ph.subscription_type
-            ORDER BY total_sales DESC
-        ");
-        $stmt->execute();
-        $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        
-        $total_sales = array_sum(array_column($results, 'total_sales'));
-        
-        foreach ($results as &$row) {
-            $row['percentage'] = $total_sales > 0 ? round(($row['total_sales'] / $total_sales) * 100, 0) : 0;
-            $row['label'] = $row['subscription_type'] == 'B' ? 'Basic (B)' : ($row['subscription_type'] == 'P' ? 'Pro (P)' : 'Demo (D)');
-        }
-        
-        return $results;
-    } catch(PDOException $e) {
-        return [];
-    }
-}
+    $sql = "
+        SELECT
+            COUNT(DISTINCT ph.order_id) AS total_orders
+        FROM TX_PURCHASE_HISTORY ph
+        LEFT JOIN TX_COUPON_CODES cc
+            ON ph.coupon_id = cc.coupon_id
+        WHERE ph.payment_status = 'S'
+        AND ph.amount > 0
+        AND cc.coupon_code LIKE 'S%'
+        $date_condition
+        $coupon_condition
+        $executive_condition
+    ";
+    $orders = $db->fetchDBQuery($sql, [], true);
 
-// Function to get executives (TOP 5 only)
-function getTopExecutives($pdo, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date, $limit = 5) {
-    try {
-        $date_condition = getDateCondition($date_filter, $from_date, $to_date);
-        $coupon_condition = getCouponFilterCondition($coupon_filter);
-        $executive_condition = getExecutiveFilterCondition($executive_filter);
-        
-        $sql = "
-            SELECT 
-                u.user_id,
-                u.full_name as executive_name,
-                COUNT(DISTINCT ph.order_id) as total_orders,
-                COALESCE(ROUND(SUM(ph.order_amount), 2), 0) as total_sales,
-                COALESCE(ROUND(SUM(ph.order_amount * 0.25), 2), 0) as total_commission,
-                COUNT(DISTINCT cc.coupon_id) as active_coupons
-            FROM users u
-            LEFT JOIN tx_purchase_history ph ON u.user_id = ph.created_by 
-                AND ph.payment_status = 'S' 
-                AND ph.amount > 0
-                $date_condition
-                $coupon_condition
-            LEFT JOIN tx_coupon_codes cc ON u.user_id = cc.created_by AND cc.is_active = 1 AND cc.coupon_code LIKE 'S%'
-            WHERE u.user_type = 'SE'
-            AND u.is_deleted = 0
-            $executive_condition
-            GROUP BY u.user_id
-            HAVING total_sales > 0 OR active_coupons > 0
-            ORDER BY total_sales DESC
-        ";
-        
-        if ($limit > 0) {
-            $sql .= " LIMIT " . $limit;
-        }
-        
-        $stmt = $pdo->prepare($sql);
-        $stmt->execute();
-        return $stmt->fetchAll(PDO::FETCH_ASSOC);
-    } catch(PDOException $e) {
-        return [];
-    }
-}
+    $sql = "
+        SELECT
+            COALESCE(ROUND(SUM(ph.order_amount * 0.25), 2), 0) AS total_commission
+        FROM TX_PURCHASE_HISTORY ph
+        LEFT JOIN TX_COUPON_CODES cc
+            ON ph.coupon_id = cc.coupon_id
+        WHERE ph.payment_status = 'S'
+        AND ph.amount > 0
+        AND cc.coupon_code LIKE 'S%'
+        $date_condition
+        $coupon_condition
+        $executive_condition
+    ";
+    $commission = $db->fetchDBQuery($sql, [], true);
 
-// Function to get ALL executives (for view all)
-function getAllExecutivesData($pdo, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date) {
-    return getTopExecutives($pdo, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date, 0);
+    $sql = "
+        SELECT
+            COUNT(*) AS total_executives
+        FROM USERS
+        WHERE user_type = 'SE'
+        AND is_deleted = 0
+    ";
+    $executives = $db->fetchDBQuery($sql, [], true);
+
+    $sql = "
+        SELECT
+            COUNT(DISTINCT ph.created_by) AS active_executives
+        FROM TX_PURCHASE_HISTORY ph
+        LEFT JOIN TX_COUPON_CODES cc
+            ON ph.coupon_id = cc.coupon_id
+        WHERE ph.payment_status = 'S'
+        AND ph.amount > 0
+        AND cc.coupon_code LIKE 'S%'
+    ";
+    $active = $db->fetchDBQuery($sql, [], true);
+
+    return [
+        'total_sales' => (float)($sales['total_sales'] ?? 0),
+        'total_orders' => (int)($orders['total_orders'] ?? 0),
+        'total_commission' => (float)($commission['total_commission'] ?? 0),
+        'total_executives' => (int)($executives['total_executives'] ?? 0),
+        'active_executives' => (int)($active['active_executives'] ?? 0)
+    ];
 }
 
 // Function to get recent orders
-function getRecentOrders($pdo, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date, $limit = 5) {
-    try {
-        $date_condition = getDateCondition($date_filter, $from_date, $to_date);
-        $executive_condition = getExecutiveFilterCondition($executive_filter);
-        $coupon_condition = getCouponFilterCondition($coupon_filter);
-        
-        $sql = "
-            SELECT 
-                ph.order_id,
-                u.full_name as student_name,
-                ex.full_name as executive_name,
-                cc.coupon_code,
-                ROUND(ph.order_amount, 2) as amount,
-                DATE_FORMAT(ph.order_date, '%d %b %Y') as order_date_formatted
-            FROM tx_purchase_history ph
-            LEFT JOIN users u ON ph.student_id = u.user_id
-            LEFT JOIN tx_coupon_codes cc ON ph.coupon_id = cc.coupon_id
-            LEFT JOIN users ex ON ph.created_by = ex.user_id
-            WHERE ph.payment_status = 'S'
-            AND ph.amount > 0
-            AND cc.coupon_code LIKE 'S%'
-            $date_condition
-            $executive_condition
-            $coupon_condition
-            ORDER BY ph.order_date DESC
-            LIMIT 5
-        ";
-        
-        $stmt = $pdo->prepare($sql);
-        $stmt->execute();
-        return $stmt->fetchAll(PDO::FETCH_ASSOC);
-    } catch(PDOException $e) {
-        return [];
-    }
+function getRecentOrders($db, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date, $limit = 5) {
+    $date_condition = getDateCondition($date_filter, $from_date, $to_date);
+    $executive_condition = getExecutiveFilterCondition($executive_filter);
+    $coupon_condition = getCouponFilterCondition($coupon_filter);
+    
+    $sql = "
+        SELECT 
+            ph.order_id,
+            u.full_name as student_name,
+            u.full_name as executive_name,
+            cc.coupon_code,
+            ROUND(ph.order_amount, 2) as amount,
+            DATE_FORMAT(ph.order_date, '%d %b %Y') as order_date_formatted
+        FROM TX_PURCHASE_HISTORY ph
+        LEFT JOIN USERS u ON ph.student_id = u.user_id
+        LEFT JOIN TX_COUPON_CODES cc ON ph.coupon_id = cc.coupon_id
+        WHERE ph.payment_status = 'S'
+        AND ph.amount > 0
+        AND cc.coupon_code LIKE 'S%'
+        $date_condition
+        $coupon_condition
+        $executive_condition
+        ORDER BY ph.order_date DESC
+        LIMIT 5
+    ";
+    
+    return $db->fetchDBQuery($sql);
 }
 
-// Function to get top performing coupons
-function getTopCoupons($pdo, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date, $limit = 5) {
-    try {
-        $date_condition = getDateCondition($date_filter, $from_date, $to_date);
-        $executive_condition = getExecutiveFilterCondition($executive_filter);
-        $coupon_condition = getCouponFilterCondition($coupon_filter);
-        
-        $sql = "
-            SELECT 
-                cc.coupon_code,
-                COUNT(ph.order_id) as total_used,
-                COALESCE(ROUND(SUM(ph.order_amount), 2), 0) as total_sales,
-                COALESCE(ROUND(SUM(ph.order_amount * 0.25), 2), 0) as total_commission
-            FROM tx_coupon_codes cc
-            LEFT JOIN tx_purchase_history ph ON cc.coupon_id = ph.coupon_id 
-                AND ph.payment_status = 'S' 
-                AND ph.amount > 0
-                $date_condition
-                $executive_condition
-                $coupon_condition
-            WHERE cc.is_active = 1
-            AND cc.coupon_code LIKE 'S%'
-            GROUP BY cc.coupon_id
-            ORDER BY total_sales DESC
-            LIMIT 5
-        ";
-        
-        $stmt = $pdo->prepare($sql);
-        $stmt->execute();
-        return $stmt->fetchAll(PDO::FETCH_ASSOC);
-    } catch(PDOException $e) {
-        return [];
+// Function to get top performing coupons - using executive_id
+function getTopCoupons($db, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date, $limit = 5) {
+    $date_condition = getDateCondition($date_filter, $from_date, $to_date);
+    $executive_condition = getExecutiveFilterCondition($executive_filter);
+    $coupon_condition = getCouponFilterCondition($coupon_filter);
+    
+    $sql = "
+        SELECT 
+            cc.coupon_code,
+            COUNT(ph.order_id) as total_used,
+            COALESCE(ROUND(SUM(ph.order_amount), 2), 0) as total_sales,
+            COALESCE(ROUND(SUM(ph.order_amount * 0.25), 2), 0) as total_commission
+        FROM TX_COUPON_CODES cc
+        LEFT JOIN TX_PURCHASE_HISTORY ph ON cc.coupon_id = ph.coupon_id 
+            AND ph.payment_status = 'S' 
+            AND ph.amount > 0
+        $date_condition
+        $coupon_condition
+        $executive_condition
+        WHERE cc.is_active = 1
+        AND cc.coupon_code LIKE 'S%'
+        GROUP BY cc.coupon_id
+        ORDER BY total_sales DESC
+        LIMIT 5
+    ";
+    
+    return $db->fetchDBQuery($sql);
+}
+
+// Function to get sales overview data - using executive_id
+function getSalesOverview($db, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date) {
+    $date_condition = getDateCondition($date_filter, $from_date, $to_date);
+    $executive_condition = getExecutiveFilterCondition($executive_filter);
+    $coupon_condition = getCouponFilterCondition($coupon_filter);
+    
+    $sql = "
+        SELECT 
+            DATE_FORMAT(ph.order_date, '%d %b') as date_label,
+            COALESCE(ROUND(SUM(ph.order_amount), 2), 0) as sales,
+            COALESCE(ROUND(SUM(ph.order_amount * 0.25), 2), 0) as commission
+        FROM TX_PURCHASE_HISTORY ph
+        LEFT JOIN TX_COUPON_CODES cc ON ph.coupon_id = cc.coupon_id
+        WHERE ph.payment_status = 'S'
+        AND ph.amount > 0
+        AND cc.coupon_code LIKE 'S%'
+        $date_condition
+        $coupon_condition
+        $executive_condition
+        GROUP BY DATE(ph.order_date)
+        ORDER BY ph.order_date ASC
+        LIMIT 30
+    ";
+    return $db->fetchDBQuery($sql);
+}
+
+// Function to get sales by discount type - using executive_id
+function getSalesByDiscountType($db, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date) {
+    $date_condition = getDateCondition($date_filter, $from_date, $to_date);
+    $executive_condition = getExecutiveFilterCondition($executive_filter);
+    $coupon_condition = getCouponFilterCondition($coupon_filter);
+    
+    $sql = "
+        SELECT 
+            cc.discount_type,
+            COALESCE(ROUND(SUM(ph.order_amount), 2), 0) as total_sales,
+            COUNT(DISTINCT ph.order_id) as order_count
+        FROM TX_PURCHASE_HISTORY ph
+        LEFT JOIN TX_COUPON_CODES cc ON ph.coupon_id = cc.coupon_id
+        WHERE ph.payment_status = 'S'
+        AND ph.amount > 0
+        AND cc.coupon_code LIKE 'S%'
+        $date_condition
+        $coupon_condition
+        $executive_condition
+        GROUP BY cc.discount_type
+        ORDER BY total_sales DESC
+    ";
+    $results = $db->fetchDBQuery($sql);
+    
+    $total_sales = array_sum(array_column($results, 'total_sales'));
+    
+    foreach ($results as &$row) {
+        $row['percentage'] = $total_sales > 0 ? round(($row['total_sales'] / $total_sales) * 100, 0) : 0;
+        $row['label'] = $row['discount_type'] == 'percentage' ? 'Percentage (%)' : 'Flat (₹)';
     }
+    
+    return $results;
+}
+
+// Function to get sales by subscription type - using executive_id
+function getSalesBySubscriptionType($db, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date) {
+    $date_condition = getDateCondition($date_filter, $from_date, $to_date);
+    $executive_condition = getExecutiveFilterCondition($executive_filter);
+    $coupon_condition = getCouponFilterCondition($coupon_filter);
+    
+    $sql = "
+        SELECT 
+            ph.subscription_type,
+            COALESCE(ROUND(SUM(ph.order_amount), 2), 0) as total_sales,
+            COUNT(DISTINCT ph.order_id) as order_count
+        FROM TX_PURCHASE_HISTORY ph
+        LEFT JOIN TX_COUPON_CODES cc ON ph.coupon_id = cc.coupon_id
+        WHERE ph.payment_status = 'S'
+        AND ph.amount > 0
+        AND cc.coupon_code LIKE 'S%'
+        $date_condition
+        $coupon_condition
+        $executive_condition
+        GROUP BY ph.subscription_type
+        ORDER BY total_sales DESC
+    ";
+    $results = $db->fetchDBQuery($sql);
+    
+    $total_sales = array_sum(array_column($results, 'total_sales'));
+    
+    foreach ($results as &$row) {
+        $row['percentage'] = $total_sales > 0 ? round(($row['total_sales'] / $total_sales) * 100, 0) : 0;
+        $row['label'] = $row['subscription_type'] == 'B' ? 'Basic (B)' : ($row['subscription_type'] == 'P' ? 'Pro (P)' : 'Demo (D)');
+    }
+    
+    return $results;
 }
 
 // ===== GET ALL DATA =====
-$stats = getDashboardStats($pdo, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date);
-$sales_overview = getSalesOverview($pdo, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date);
-$subscription_sales = getSalesBySubscriptionType($pdo, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date);
-$discount_sales = getSalesByDiscountType($pdo, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date);
-$top_executives = getTopExecutives($pdo, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date, 5);
-$recent_orders = getRecentOrders($pdo, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date, 5);
-$top_coupons = getTopCoupons($pdo, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date, 5);
-
-// Get date range display
-function getDateRangeDisplay($date_filter, $from_date = '', $to_date = '') {
-    switch ($date_filter) {
-        case 'today': return 'Today';
-        case 'week': return 'Last 7 Days';
-        case '15days': return 'Last 15 Days';
-        case 'month': return 'Last 1 Month';
-        case '3months': return 'Last 3 Months';
-        case '6months': return 'Last 6 Months';
-        case 'year': return 'Last 1 Year';
-        case 'custom':
-            if (!empty($from_date) && !empty($to_date)) {
-                return date('d M Y', strtotime($from_date)) . ' - ' . date('d M Y', strtotime($to_date));
-            }
-            return 'Custom';
-        default: return 'All Time';
-    }
-}
+$stats = getDashboardStats($db, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date);
+$sales_overview = getSalesOverview($db, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date);
+$subscription_sales = getSalesBySubscriptionType($db, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date);
+$discount_sales = getSalesByDiscountType($db, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date);
+$top_executives = getTopExecutives($db, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date, 5);
+$recent_orders = getRecentOrders($db, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date, 5);
+$top_coupons = getTopCoupons($db, $date_filter, $executive_filter, $coupon_filter, $from_date, $to_date, 5);
 
 $show_custom_dates = ($date_filter == 'custom');
+
+// getDateRangeDisplay() is now in config.php - DO NOT redeclare it here!
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -535,441 +477,424 @@ $show_custom_dates = ($date_filter == 'custom');
             font-weight: 600;
         }
         
-        /* =============================================
-   FILTER SECTION - CLEAN COMPACT BAR
-   ============================================= */
-.filter-section {
-    background: white;
-    padding: 10px 20px;
-    border-radius: 8px;
-    margin-bottom: 25px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-    display: flex;
-    flex-wrap: nowrap;
-    align-items: flex-end;
-    gap: 8px;
-    overflow: visible;
-    min-height: 55px;
-    position: relative;
-    z-index: 1;
-}
-.filter-section .filter-group {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    flex-shrink: 0;
-    position: relative;
-}
-.filter-section .filter-label {
-    font-size: 8px;
-    font-weight: 700;
-    color: #6c7a8a;
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
-    margin-bottom: 1px;
-}
-.filter-section select, 
-.filter-section input {
-    padding: 5px 10px;
-    border: 1px solid #e2e8f0;
-    border-radius: 6px;
-    font-size: 11px;
-    background: white;
-    color: #2d3748;
-    min-width: 90px;
-    cursor: pointer;
-    height: 28px;
-    transition: border-color 0.2s, box-shadow 0.2s;
-}
-.filter-section select:hover, 
-.filter-section input:hover {
-    border-color: #b0c4de;
-}
-.filter-section select:focus, 
-.filter-section input:focus {
-    outline: none;
-    border-color: #667eea;
-    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.12);
-}
-.filter-section .filter-divider {
-    width: 1px;
-    height: 28px;
-    background: #e2e8f0;
-    flex-shrink: 0;
-    align-self: flex-end;
-}
-.filter-section .filter-info {
-    font-size: 10px;
-    color: #718096;
-    background: #f7fafc;
-    padding: 4px 12px;
-    border-radius: 4px;
-    display: flex;
-    align-items: center;
-    height: 28px;
-    white-space: nowrap;
-    flex-shrink: 0;
-    border: 1px solid #edf2f7;
-}
-.filter-section .filter-info strong {
-    color: #2d3748;
-    font-weight: 600;
-}
+        .filter-section {
+            background: white;
+            padding: 10px 20px;
+            border-radius: 8px;
+            margin-bottom: 25px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+            display: flex;
+            flex-wrap: nowrap;
+            align-items: flex-end;
+            gap: 8px;
+            overflow: visible;
+            min-height: 55px;
+            position: relative;
+            z-index: 1;
+        }
+        .filter-section .filter-group {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            flex-shrink: 0;
+            position: relative;
+        }
+        .filter-section .filter-label {
+            font-size: 8px;
+            font-weight: 700;
+            color: #6c7a8a;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            margin-bottom: 1px;
+        }
+        .filter-section select, 
+        .filter-section input {
+            padding: 5px 10px;
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            font-size: 11px;
+            background: white;
+            color: #2d3748;
+            min-width: 90px;
+            cursor: pointer;
+            height: 28px;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        .filter-section select:hover, 
+        .filter-section input:hover {
+            border-color: #b0c4de;
+        }
+        .filter-section select:focus, 
+        .filter-section input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.12);
+        }
+        .filter-section .filter-divider {
+            width: 1px;
+            height: 28px;
+            background: #e2e8f0;
+            flex-shrink: 0;
+            align-self: flex-end;
+        }
+        .filter-section .filter-info {
+            font-size: 10px;
+            color: #718096;
+            background: #f7fafc;
+            padding: 4px 12px;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            height: 28px;
+            white-space: nowrap;
+            flex-shrink: 0;
+            border: 1px solid #edf2f7;
+        }
+        .filter-section .filter-info strong {
+            color: #2d3748;
+            font-weight: 600;
+        }
 
-/* Custom Date Group */
-.filter-section .custom-date-group {
-    display: none;
-    align-items: flex-end;
-    gap: 6px;
-    flex-shrink: 0;
-}
-.filter-section .custom-date-group.show {
-    display: flex;
-}
-.filter-section .custom-date-group input {
-    min-width: 80px;
-    padding: 5px 8px;
-    border: 1px solid #e2e8f0;
-    border-radius: 6px;
-    font-size: 10px;
-    height: 28px;
-    cursor: pointer;
-}
-.filter-section .custom-date-group .filter-group {
-    flex-direction: column;
-}
-.filter-section .custom-date-group .filter-group .filter-label {
-    font-size: 7px;
-}
+        .filter-section .custom-date-group {
+            display: none;
+            align-items: flex-end;
+            gap: 6px;
+            flex-shrink: 0;
+        }
+        .filter-section .custom-date-group.show {
+            display: flex;
+        }
+        .filter-section .custom-date-group input {
+            min-width: 80px;
+            padding: 5px 8px;
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            font-size: 10px;
+            height: 28px;
+            cursor: pointer;
+        }
+        .filter-section .custom-date-group .filter-group {
+            flex-direction: column;
+        }
+        .filter-section .custom-date-group .filter-group .filter-label {
+            font-size: 7px;
+        }
 
-/* Loading Spinner */
-.filter-loading {
-    display: none;
-    align-items: center;
-    font-size: 10px;
-    color: #667eea;
-    font-weight: 500;
-    height: 28px;
-    flex-shrink: 0;
-}
-.filter-loading .spinner {
-    display: inline-block;
-    width: 12px;
-    height: 12px;
-    border: 2px solid #e2e8f0;
-    border-top: 2px solid #667eea;
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-    margin-right: 6px;
-    vertical-align: middle;
-}
+        .filter-loading {
+            display: none;
+            align-items: center;
+            font-size: 10px;
+            color: #667eea;
+            font-weight: 500;
+            height: 28px;
+            flex-shrink: 0;
+        }
+        .filter-loading .spinner {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border: 2px solid #e2e8f0;
+            border-top: 2px solid #667eea;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-right: 6px;
+            vertical-align: middle;
+        }
 
-@keyframes spin {
-    0% { transform: rotate(0deg); }
-    100% { transform: rotate(360deg); }
-}
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
 
-/* Buttons */
-.btn-apply {
-    padding: 5px 18px;
-    background: #667eea;
-    color: white;
-    border: none;
-    border-radius: 6px;
-    font-size: 11px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.2s;
-    height: 28px;
-    min-width: 55px;
-    flex-shrink: 0;
-    letter-spacing: 0.3px;
-}
-.btn-apply:hover {
-    background: #5a6fd6;
-    transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
-}
-.btn-apply:active {
-    transform: translateY(0);
-}
+        .btn-apply {
+            padding: 5px 18px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            height: 28px;
+            min-width: 55px;
+            flex-shrink: 0;
+            letter-spacing: 0.3px;
+        }
+        .btn-apply:hover {
+            background: #5a6fd6;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+        }
+        .btn-apply:active {
+            transform: translateY(0);
+        }
 
-.btn-reset-filter {
-    padding: 5px 14px;
-    background: #fc8181;
-    color: white;
-    border: none;
-    border-radius: 6px;
-    font-size: 10px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.2s;
-    height: 28px;
-    flex-shrink: 0;
-}
-.btn-reset-filter:hover {
-    background: #f56565;
-}
+        .btn-reset-filter {
+            padding: 5px 14px;
+            background: #fc8181;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 10px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            height: 28px;
+            flex-shrink: 0;
+        }
+        .btn-reset-filter:hover {
+            background: #f56565;
+        }
 
-/* =============================================
-   SEARCHABLE DROPDOWN - CLEAN OUTSIDE BAR
-   ============================================= */
-.searchable-dropdown {
-    position: relative;
-    min-width: 120px;
-    flex-shrink: 0;
-}
-.searchable-dropdown .dropdown-input {
-    padding: 5px 10px;
-    border: 1px solid #e2e8f0;
-    border-radius: 6px;
-    font-size: 11px;
-    background: white;
-    color: #2d3748;
-    width: 100%;
-    cursor: pointer;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    height: 28px;
-    min-width: 120px;
-    transition: border-color 0.2s, box-shadow 0.2s;
-}
-.searchable-dropdown .dropdown-input:hover {
-    border-color: #b0c4de;
-}
-.searchable-dropdown .dropdown-input:focus-within {
-    border-color: #667eea;
-    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.12);
-}
-.searchable-dropdown .dropdown-input .arrow {
-    transition: transform 0.25s ease;
-    font-size: 8px;
-    color: #a0aec0;
-    margin-left: 6px;
-    flex-shrink: 0;
-}
-.searchable-dropdown .dropdown-input .arrow.open {
-    transform: rotate(180deg);
-}
+        .searchable-dropdown {
+            position: relative;
+            min-width: 120px;
+            flex-shrink: 0;
+        }
+        .searchable-dropdown .dropdown-input {
+            padding: 5px 10px;
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            font-size: 11px;
+            background: white;
+            color: #2d3748;
+            width: 100%;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            height: 28px;
+            min-width: 120px;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        .searchable-dropdown .dropdown-input:hover {
+            border-color: #b0c4de;
+        }
+        .searchable-dropdown .dropdown-input:focus-within {
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.12);
+        }
+        .searchable-dropdown .dropdown-input .arrow {
+            transition: transform 0.25s ease;
+            font-size: 8px;
+            color: #a0aec0;
+            margin-left: 6px;
+            flex-shrink: 0;
+        }
+        .searchable-dropdown .dropdown-input .arrow.open {
+            transform: rotate(180deg);
+        }
 
-/* Dropdown Menu - Opens OUTSIDE the bar */
-.searchable-dropdown .dropdown-menu {
-    display: none;
-    position: absolute;
-    top: calc(100% + 4px);
-    left: 0;
-    right: auto;
-    min-width: 220px;
-    background: white;
-    border: 1px solid #e2e8f0;
-    border-radius: 8px;
-    margin-top: 0;
-    box-shadow: 0 8px 30px rgba(0,0,0,0.12);
-    z-index: 9999;
-    max-height: 280px;
-    overflow: hidden;
-    padding: 4px 0;
-}
-.searchable-dropdown .dropdown-menu.open {
-    display: block;
-}
-.searchable-dropdown .dropdown-menu .search-box {
-    padding: 6px 10px;
-    border-bottom: 1px solid #edf2f7;
-    position: sticky;
-    top: 0;
-    background: white;
-    z-index: 2;
-}
-.searchable-dropdown .dropdown-menu .search-box input {
-    width: 100%;
-    padding: 5px 10px;
-    border: 1px solid #e2e8f0;
-    border-radius: 6px;
-    font-size: 11px;
-    outline: none;
-    height: 28px;
-    background: #f7fafc;
-    transition: border-color 0.2s;
-}
-.searchable-dropdown .dropdown-menu .search-box input:focus {
-    border-color: #667eea;
-    background: white;
-    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-}
-.searchable-dropdown .dropdown-menu .search-box input::placeholder {
-    color: #a0aec0;
-    font-size: 10px;
-}
+        .searchable-dropdown .dropdown-menu {
+            display: none;
+            position: absolute;
+            top: calc(100% + 4px);
+            left: 0;
+            right: auto;
+            min-width: 220px;
+            background: white;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            margin-top: 0;
+            box-shadow: 0 8px 30px rgba(0,0,0,0.12);
+            z-index: 9999;
+            max-height: 280px;
+            overflow: hidden;
+            padding: 4px 0;
+        }
+        .searchable-dropdown .dropdown-menu.open {
+            display: block;
+        }
+        .searchable-dropdown .dropdown-menu .search-box {
+            padding: 6px 10px;
+            border-bottom: 1px solid #edf2f7;
+            position: sticky;
+            top: 0;
+            background: white;
+            z-index: 2;
+        }
+        .searchable-dropdown .dropdown-menu .search-box input {
+            width: 100%;
+            padding: 5px 10px;
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            font-size: 11px;
+            outline: none;
+            height: 28px;
+            background: #f7fafc;
+            transition: border-color 0.2s;
+        }
+        .searchable-dropdown .dropdown-menu .search-box input:focus {
+            border-color: #667eea;
+            background: white;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+        .searchable-dropdown .dropdown-menu .search-box input::placeholder {
+            color: #a0aec0;
+            font-size: 10px;
+        }
 
-.searchable-dropdown .dropdown-menu .options {
-    max-height: 200px;
-    overflow-y: auto;
-    padding: 4px 0;
-}
-.searchable-dropdown .dropdown-menu .options .option-item {
-    padding: 6px 14px;
-    cursor: pointer;
-    font-size: 11px;
-    color: #2d3748;
-    transition: background 0.15s;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-}
-.searchable-dropdown .dropdown-menu .options .option-item:hover {
-    background: #f7fafc;
-}
-.searchable-dropdown .dropdown-menu .options .option-item.selected {
-    background: #ebf4ff;
-    color: #667eea;
-    font-weight: 600;
-}
-.searchable-dropdown .dropdown-menu .options .option-item .check {
-    color: #667eea;
-    font-size: 11px;
-    font-weight: 700;
-}
+        .searchable-dropdown .dropdown-menu .options {
+            max-height: 200px;
+            overflow-y: auto;
+            padding: 4px 0;
+        }
+        .searchable-dropdown .dropdown-menu .options .option-item {
+            padding: 6px 14px;
+            cursor: pointer;
+            font-size: 11px;
+            color: #2d3748;
+            transition: background 0.15s;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .searchable-dropdown .dropdown-menu .options .option-item:hover {
+            background: #f7fafc;
+        }
+        .searchable-dropdown .dropdown-menu .options .option-item.selected {
+            background: #ebf4ff;
+            color: #667eea;
+            font-weight: 600;
+        }
+        .searchable-dropdown .dropdown-menu .options .option-item .check {
+            color: #667eea;
+            font-size: 11px;
+            font-weight: 700;
+        }
 
-/* Scrollbar styling for dropdown */
-.searchable-dropdown .dropdown-menu .options::-webkit-scrollbar {
-    width: 4px;
-}
-.searchable-dropdown .dropdown-menu .options::-webkit-scrollbar-track {
-    background: #f7fafc;
-}
-.searchable-dropdown .dropdown-menu .options::-webkit-scrollbar-thumb {
-    background: #cbd5e0;
-    border-radius: 4px;
-}
-.searchable-dropdown .dropdown-menu .options::-webkit-scrollbar-thumb:hover {
-    background: #a0aec0;
-}
+        .searchable-dropdown .dropdown-menu .options::-webkit-scrollbar {
+            width: 4px;
+        }
+        .searchable-dropdown .dropdown-menu .options::-webkit-scrollbar-track {
+            background: #f7fafc;
+        }
+        .searchable-dropdown .dropdown-menu .options::-webkit-scrollbar-thumb {
+            background: #cbd5e0;
+            border-radius: 4px;
+        }
+        .searchable-dropdown .dropdown-menu .options::-webkit-scrollbar-thumb:hover {
+            background: #a0aec0;
+        }
 
-/* =============================================
-   CHIPS - BELOW DROPDOWN
-   ============================================= */
-.filter-chips {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 3px;
-    margin-top: 3px;
-    min-height: 18px;
-}
-.filter-chips .chip {
-    display: inline-flex;
-    align-items: center;
-    background: #ebf4ff;
-    color: #667eea;
-    padding: 1px 6px 1px 8px;
-    border-radius: 12px;
-    font-size: 9px;
-    font-weight: 500;
-    gap: 3px;
-    border: 1px solid rgba(102, 126, 234, 0.15);
-}
-.filter-chips .chip .remove {
-    cursor: pointer;
-    font-size: 10px;
-    color: #667eea;
-    opacity: 0.6;
-    transition: opacity 0.2s;
-    line-height: 1;
-}
-.filter-chips .chip .remove:hover {
-    opacity: 1;
-}
+        .filter-chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 3px;
+            margin-top: 3px;
+            min-height: 18px;
+        }
+        .filter-chips .chip {
+            display: inline-flex;
+            align-items: center;
+            background: #ebf4ff;
+            color: #667eea;
+            padding: 1px 6px 1px 8px;
+            border-radius: 12px;
+            font-size: 9px;
+            font-weight: 500;
+            gap: 3px;
+            border: 1px solid rgba(102, 126, 234, 0.15);
+        }
+        .filter-chips .chip .remove {
+            cursor: pointer;
+            font-size: 10px;
+            color: #667eea;
+            opacity: 0.6;
+            transition: opacity 0.2s;
+            line-height: 1;
+        }
+        .filter-chips .chip .remove:hover {
+            opacity: 1;
+        }
 
-/* =============================================
-   RESPONSIVE DESIGN
-   ============================================= */
-@media (max-width: 1200px) {
-    .filter-section {
-        flex-wrap: wrap;
-        gap: 6px;
-        padding: 10px 15px;
-    }
-    .filter-section select, 
-    .filter-section input {
-        min-width: 70px;
-        font-size: 10px;
-    }
-    .searchable-dropdown {
-        min-width: 100px;
-    }
-    .searchable-dropdown .dropdown-input {
-        min-width: 100px;
-    }
-    .searchable-dropdown .dropdown-menu {
-        min-width: 180px;
-    }
-}
-@media (max-width: 992px) {
-    .filter-section .filter-divider { display: none; }
-}
-@media (max-width: 768px) {
-    .filter-section {
-        flex-direction: column;
-        align-items: stretch;
-        padding: 12px 15px;
-        gap: 6px;
-        overflow: visible;
-    }
-    .filter-section .filter-group { 
-        width: 100%; 
-        flex-shrink: 1;
-    }
-    .filter-section .filter-divider { display: none; }
-    .filter-section .filter-info { 
-        text-align: center; 
-        white-space: normal; 
-        height: auto; 
-        padding: 6px 12px;
-        justify-content: center;
-    }
-    .filter-section .custom-date-group { 
-        flex-wrap: wrap; 
-        width: 100%;
-    }
-    .filter-section .custom-date-group .filter-group { 
-        flex: 1; 
-        min-width: 80px;
-    }
-    .searchable-dropdown { 
-        min-width: 100%; 
-        width: 100%;
-    }
-    .searchable-dropdown .dropdown-input { 
-        min-width: 100%; 
-        width: 100%;
-    }
-    .searchable-dropdown .dropdown-menu {
-        min-width: 100%;
-        width: 100%;
-        left: 0;
-        right: 0;
-    }
-    .btn-apply { width: 100%; }
-    .btn-reset-filter { width: 100%; text-align: center; }
-    .dashboard-header { flex-direction: column; align-items: stretch; }
-    .filter-section select, 
-    .filter-section input {
-        min-width: 100%;
-        width: 100%;
-    }
-}
-@media (max-width: 480px) {
-    .filter-section {
-        padding: 10px 12px;
-    }
-    .filter-section .custom-date-group {
-        flex-direction: column;
-    }
-    .filter-section .custom-date-group .filter-group {
-        min-width: 100%;
-    }
-}
+        @media (max-width: 1200px) {
+            .filter-section {
+                flex-wrap: wrap;
+                gap: 6px;
+                padding: 10px 15px;
+            }
+            .filter-section select, 
+            .filter-section input {
+                min-width: 70px;
+                font-size: 10px;
+            }
+            .searchable-dropdown {
+                min-width: 100px;
+            }
+            .searchable-dropdown .dropdown-input {
+                min-width: 100px;
+            }
+            .searchable-dropdown .dropdown-menu {
+                min-width: 180px;
+            }
+        }
+        @media (max-width: 992px) {
+            .filter-section .filter-divider { display: none; }
+        }
+        @media (max-width: 768px) {
+            .filter-section {
+                flex-direction: column;
+                align-items: stretch;
+                padding: 12px 15px;
+                gap: 6px;
+                overflow: visible;
+            }
+            .filter-section .filter-group { 
+                width: 100%; 
+                flex-shrink: 1;
+            }
+            .filter-section .filter-divider { display: none; }
+            .filter-section .filter-info { 
+                text-align: center; 
+                white-space: normal; 
+                height: auto; 
+                padding: 6px 12px;
+                justify-content: center;
+            }
+            .filter-section .custom-date-group { 
+                flex-wrap: wrap; 
+                width: 100%;
+            }
+            .filter-section .custom-date-group .filter-group { 
+                flex: 1; 
+                min-width: 80px;
+            }
+            .searchable-dropdown { 
+                min-width: 100%; 
+                width: 100%;
+            }
+            .searchable-dropdown .dropdown-input { 
+                min-width: 100%; 
+                width: 100%;
+            }
+            .searchable-dropdown .dropdown-menu {
+                min-width: 100%;
+                width: 100%;
+                left: 0;
+                right: 0;
+            }
+            .btn-apply { width: 100%; }
+            .btn-reset-filter { width: 100%; text-align: center; }
+            .dashboard-header { flex-direction: column; align-items: stretch; }
+            .filter-section select, 
+            .filter-section input {
+                min-width: 100%;
+                width: 100%;
+            }
+        }
+        @media (max-width: 480px) {
+            .filter-section {
+                padding: 10px 12px;
+            }
+            .filter-section .custom-date-group {
+                flex-direction: column;
+            }
+            .filter-section .custom-date-group .filter-group {
+                min-width: 100%;
+            }
+        }
         
         .stats-grid {
             display: grid;
@@ -1159,9 +1084,7 @@ $show_custom_dates = ($date_filter == 'custom');
             font-size: 12px;
             color: #2c3e50;
         }
-        .executive-rank.gold { background: #ffd700; color: #856404; }
-        .executive-rank.silver { background: #c0c0c0; color: #495057; }
-        .executive-rank.bronze { background: #cd7f32; color: white; }
+        
         
         .badge-s {
             display: inline-block;
@@ -1203,16 +1126,9 @@ $show_custom_dates = ($date_filter == 'custom');
 <body>
     <div class="dashboard-container">
         <!-- Header -->
-        <div class="dashboard-header">
-            <h1>
-                <i class="fas fa-chart-pie"></i>
-                Admin Dashboard
-                <span style="font-size: 14px; font-weight: 400; color: #7f8c8d; margin-left: 5px;">Monitor overall performance</span>
-            </h1>
-            
-        </div>
+        
 
-        <!-- Filter Section - All in One Line -->
+        <!-- Filter Section -->
         <div class="filter-section">
             <!-- Executive Filter -->
             <div class="filter-group">
@@ -1333,7 +1249,9 @@ $show_custom_dates = ($date_filter == 'custom');
             <button class="btn-apply" id="applyBtn"><i class="fas fa-check"></i> Apply</button>
             <button class="btn-reset-filter" id="resetBtn"><i class="fas fa-undo"></i> Reset</button>
             
-            
+            <div class="filter-loading" id="filterLoading">
+                <span class="spinner"></span> Loading...
+            </div>
         </div>
 
         <!-- Stats Grid -->
@@ -1360,7 +1278,39 @@ $show_custom_dates = ($date_filter == 'custom');
             </div>
         </div>
 
-       
+        <!-- Sales & Commission Overview -->
+        <div class="section">
+            <div class="section-title">📈 Sales & Commission Overview</div>
+            <div class="chart-row">
+                <div class="chart-box">
+                    <div class="chart-title">Sales & Commission Trend</div>
+                    <canvas id="salesChart"></canvas>
+                </div>
+                <div class="chart-box">
+                    <div style="font-size: 12px; font-weight: 600; color: #2c3e50; margin-bottom: 10px; text-align: center;">Sales by Discount Type</div>
+                    <div style="display: flex; justify-content: center;">
+                        <div style="width: 150px; height: 150px; position: relative;">
+                            <canvas id="discountChart"></canvas>
+                        </div>
+                    </div>
+                    <div style="margin-top: 8px; display: flex; justify-content: center; gap: 15px; flex-wrap: wrap;" id="discountLegend">
+                        <?php foreach ($discount_sales as $discount): 
+                            $dlabel = $discount['label'];
+                            $dpercentage = $discount['percentage'];
+                            $dcolor = $discount['discount_type'] == 'percentage' ? '#3498db' : '#27ae60';
+                        ?>
+                        <div style="display: flex; align-items: center; gap: 4px; font-size: 11px;">
+                            <span style="display: inline-block; width: 10px; height: 10px; background: <?php echo $dcolor; ?>; border-radius: 50%;"></span>
+                            <span><?php echo $dlabel; ?> (<?php echo $dpercentage; ?>%)</span>
+                        </div>
+                        <?php endforeach; ?>
+                        <?php if (empty($discount_sales)): ?>
+                        <div style="color: #7f8c8d; font-size: 12px;">No data available</div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            </div>
+        </div>
 
         <!-- Top Executives -->
         <div class="section">
@@ -1457,7 +1407,7 @@ $show_custom_dates = ($date_filter == 'custom');
             <div class="section" style="margin-bottom: 0;">
                 <div class="section-header">
                     <div class="section-title">🎫 Most Used Coupons</div>
-                   
+                    
                 </div>
                 
                 <?php if (count($top_coupons) > 0): ?>
@@ -1491,45 +1441,10 @@ $show_custom_dates = ($date_filter == 'custom');
                 <?php endif; ?>
             </div>
         </div>
-         <!-- Sales & Commission Overview -->
-        <div class="section">
-            <div class="section-title">📈 Sales & Commission Overview</div>
-            <div class="chart-row">
-                <div class="chart-box">
-                    <div class="chart-title">Sales & Commission Trend</div>
-                    <canvas id="salesChart"></canvas>
-                </div>
-                <div class="chart-box">
-                    <div style="font-size: 12px; font-weight: 600; color: #2c3e50; margin-bottom: 10px; text-align: center;">Sales by Discount Type</div>
-                    <div style="display: flex; justify-content: center;">
-                        <div style="width: 150px; height: 150px; position: relative;">
-                            <canvas id="discountChart"></canvas>
-                        </div>
-                    </div>
-                    <div style="margin-top: 8px; display: flex; justify-content: center; gap: 15px; flex-wrap: wrap;" id="discountLegend">
-                        <?php foreach ($discount_sales as $discount): 
-                            $dlabel = $discount['label'];
-                            $dpercentage = $discount['percentage'];
-                            $dcolor = $discount['discount_type'] == 'percentage' ? '#3498db' : '#27ae60';
-                        ?>
-                        <div style="display: flex; align-items: center; gap: 4px; font-size: 11px;">
-                            <span style="display: inline-block; width: 10px; height: 10px; background: <?php echo $dcolor; ?>; border-radius: 50%;"></span>
-                            <span><?php echo $dlabel; ?> (<?php echo $dpercentage; ?>%)</span>
-                        </div>
-                        <?php endforeach; ?>
-                        <?php if (empty($discount_sales)): ?>
-                        <div style="color: #7f8c8d; font-size: 12px;">No data available</div>
-                        <?php endif; ?>
-                    </div>
-                </div>
-            </div>
-        </div>
     </div>
 
     <script>
-        // =============================================
         // SEARCHABLE DROPDOWN FUNCTIONS
-        // =============================================
         function toggleDropdown(id) {
             var menu = document.getElementById(id).querySelector('.dropdown-menu');
             var arrow = document.getElementById(id).querySelector('.arrow');
@@ -1646,10 +1561,7 @@ $show_custom_dates = ($date_filter == 'custom');
             }
         }
 
-        // =============================================
-        // INITIALIZE CHARTS
-        // =============================================
-        
+        // INITIALIZE CHARTS      
         var ctx = document.getElementById('salesChart').getContext('2d');
         var salesData = <?php echo json_encode($sales_overview); ?>;
         
@@ -1772,46 +1684,51 @@ $show_custom_dates = ($date_filter == 'custom');
                 cutout: '65%'
             }
         });
-
-        // =============================================
         // APPLY FILTERS
-        // =============================================
-        function applyFilters() {
-            $('#filterLoading').addClass('show');
-            
-            var execSelected = document.querySelector('#executiveDropdown .option-item.selected');
-            var execValue = execSelected ? execSelected.getAttribute('data-value') : '0';
-            
-            var couponSelected = document.querySelector('#couponDropdown .option-item.selected');
-            var couponValue = couponSelected ? couponSelected.getAttribute('data-value') : 'all';
-            
-            var formData = {
-                executive_filter: execValue,
-                coupon_filter: couponValue,
-                date_filter: document.getElementById('date_filter').value,
-                from_date: document.getElementById('from_date').value,
-                to_date: document.getElementById('to_date').value
-            };
-            
-            $.ajax({
-                url: 'ajax_admin_dashboard.php',
-                type: 'GET',
-                data: formData,
-                dataType: 'json',
-                success: function(response) {
-                    if (response.success) {
-                        updateDashboard(response);
-                    }
-                },
-                error: function(xhr, status, error) {
-                    console.error('AJAX Error:', error);
-                },
-                complete: function() {
-                    $('#filterLoading').removeClass('show');
-                }
-            });
-        }
 
+function applyFilters() {
+    $('#filterLoading').addClass('show');
+    
+    var execSelected = document.querySelector('#executiveDropdown .option-item.selected');
+    var execValue = execSelected ? execSelected.getAttribute('data-value') : '0';
+    
+    var couponSelected = document.querySelector('#couponDropdown .option-item.selected');
+    var couponValue = couponSelected ? couponSelected.getAttribute('data-value') : 'all';
+    
+    var formData = {
+        executive_filter: execValue,
+        coupon_filter: couponValue,
+        date_filter: document.getElementById('date_filter').value,
+        from_date: document.getElementById('from_date').value,
+        to_date: document.getElementById('to_date').value
+    };
+    
+    $.ajax({
+        url: 'ajax_admin_dashboard.php', 
+        type: 'GET',
+        data: formData,
+        dataType: 'json',
+        success: function(response) {
+            if (response.success) {
+                updateDashboard(response);
+            } else {
+                console.error('Error:', response.error);
+                alert('Error applying filters: ' + (response.error || 'Unknown error'));
+            }
+        },
+        error: function(xhr, status, error) {
+            console.error('AJAX Error:', error);
+            console.error('Status:', status);
+            console.error('Response:', xhr.responseText);
+            alert('Error applying filters. Please try again.');
+        },
+        complete: function() {
+            $('#filterLoading').removeClass('show');
+        }
+    });
+}
+
+ 
         function updateDashboard(response) {
             // Update Stats
             $('#totalSales').text('₹ ' + formatNumber(response.stats.total_sales));
@@ -1978,10 +1895,7 @@ $show_custom_dates = ($date_filter == 'custom');
                 tbody.html('<tr><td colspan="4" style="text-align: center; padding: 20px; color: #7f8c8d;">No coupon data available</td></tr>');
             }
         }
-
-        // =============================================
         // EVENT HANDLERS
-        // =============================================
         
         document.getElementById('applyBtn').addEventListener('click', applyFilters);
 
